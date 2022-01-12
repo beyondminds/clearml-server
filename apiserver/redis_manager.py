@@ -1,6 +1,7 @@
 import threading
 from os import getenv
 from time import sleep
+from typing import Tuple, Optional
 
 from boltons.iterutils import first
 from redis import StrictRedis
@@ -22,6 +23,10 @@ OVERRIDE_PORT_ENV_KEY = (
     "REDIS_SERVICE_PORT",
 )
 
+OVERRIDE_USERNAME_ENV_KEY = ("CLEARML_REDIS_SERVICE_USERNAME",)
+
+OVERRIDE_PASSWORD_ENV_KEY = ("CLEARML_REDIS_SERVICE_PASSWORD",)
+
 OVERRIDE_HOST = first(filter(None, map(getenv, OVERRIDE_HOST_ENV_KEY)))
 if OVERRIDE_HOST:
     log.info(f"Using override redis host {OVERRIDE_HOST}")
@@ -29,6 +34,18 @@ if OVERRIDE_HOST:
 OVERRIDE_PORT = first(filter(None, map(getenv, OVERRIDE_PORT_ENV_KEY)))
 if OVERRIDE_PORT:
     log.info(f"Using override redis port {OVERRIDE_PORT}")
+
+OVERRIDE_USERNAME = first(filter(None, map(getenv, OVERRIDE_USERNAME_ENV_KEY)))
+if OVERRIDE_USERNAME:
+    log.info(f"Using override redis username {OVERRIDE_USERNAME}")
+
+OVERRIDE_PASSWORD = first(filter(None, map(getenv, OVERRIDE_PASSWORD_ENV_KEY)))
+if OVERRIDE_PASSWORD:
+    log.info("Using override redis password ********")
+
+
+class MissingPasswordForRedisSecuredCluster(Exception):
+    pass
 
 
 class MyPubSubWorkerThread(threading.Thread):
@@ -142,6 +159,19 @@ class RedisManager(object):
             if port:
                 alias_config["port"] = port
 
+            username, password = (
+                self.get_credentials()
+                if alias_config.get("secure", True)
+                else None
+            )
+
+            if username:
+                alias_config["username"] = username
+
+            if password:
+                del alias_config["secure"]
+                alias_config["password"] = password
+
             db = alias_config.get("db", 0)
 
             sentinels = alias_config.get("sentinels", None)
@@ -172,6 +202,17 @@ class RedisManager(object):
                 )
             else:
                 self.aliases[alias] = StrictRedis(**alias_config)
+
+    @staticmethod
+    def get_credentials() -> Optional[Tuple[str, str]]:
+        redis_user = OVERRIDE_USERNAME
+
+        elastic_password = OVERRIDE_PASSWORD
+
+        if not elastic_password:
+            raise MissingPasswordForRedisSecuredCluster()
+
+        return redis_user, elastic_password
 
     def connection(self, alias) -> StrictRedis:
         obj = self.aliases.get(alias)
