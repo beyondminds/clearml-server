@@ -6,9 +6,6 @@ from apiserver.tests.automated import TestService
 
 
 class TestQueueAndModelMetadata(TestService):
-    def setUp(self, version="2.13"):
-        super().setUp(version=version)
-
     meta1 = [{"key": "test_key", "type": "str", "value": "test_value"}]
 
     def test_queue_metas(self):
@@ -72,3 +69,12 @@ class TestQueueAndModelMetadata(TestService):
         return self.create_temp(
             "models", uri="file://test", name=name, labels={}, **kwargs
         )
+
+    def temp_project(self, **kwargs) -> str:
+        self.update_missing(
+            kwargs,
+            name="Test models meta",
+            description="test",
+            delete_params=dict(force=True),
+        )
+        return self.create_temp("projects", **kwargs)

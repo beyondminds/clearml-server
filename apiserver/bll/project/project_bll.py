@@ -1,6 +1,6 @@
 import itertools
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import reduce
 from itertools import groupby
 from operator import itemgetter
@@ -57,10 +57,14 @@ class ProjectBLL:
         with TimingContext("mongo", "move_project"):
             if source_id == destination_id:
                 raise errors.bad_request.ProjectSourceAndDestinationAreTheSame(
-                    parent=source_id
+                    source=source_id
                 )
             source = Project.get(company, source_id)
             destination = Project.get(company, destination_id)
+            if source_id in destination.path:
+                raise errors.bad_request.ProjectCannotBeMergedIntoItsChild(
+                    source=source_id, destination=destination_id
+                )
 
             children = _get_sub_projects(
                 [source.id], _only=("id", "name", "parent", "path")
@@ -140,7 +144,14 @@ class ProjectBLL:
                 raise errors.bad_request.ProjectSourceAndDestinationAreTheSame(
                     location=new_parent.name if new_parent else ""
                 )
-
+            if (
+                new_parent
+                and project_id == new_parent.id
+                or project_id in new_parent.path
+            ):
+                raise errors.bad_request.ProjectCannotBeMovedUnderItself(
+                    project=project_id, parent=new_parent.id
+                )
             moved = _reposition_project_with_children(
                 project, children=children, parent=new_parent
             )
@@ -295,6 +306,7 @@ class ProjectBLL:
             return project
 
     archived_tasks_cond = {"$in": [EntityVisibility.archived.value, "$system_tags"]}
+    visibility_states = [EntityVisibility.archived, EntityVisibility.active]
 
     @classmethod
     def make_projects_get_all_pipelines(
@@ -356,6 +368,26 @@ class ProjectBLL:
             },
         ]
 
+        def completed_after_subquery(additional_cond, time_thresh: datetime):
+            return {
+                # the sum of
+                "$sum": {
+                    # for each task
+                    "$cond": {
+                        # if completed after the time_thresh
+                        "if": {
+                            "$and": [
+                                "$completed",
+                                {"$gt": ["$completed", time_thresh]},
+                                additional_cond,
+                            ]
+                        },
+                        "then": 1,
+                        "else": 0,
+                    }
+                }
+            }
+
         def runtime_subquery(additional_cond):
             return {
                 # the sum of
@@ -386,16 +418,19 @@ class ProjectBLL:
             }
 
         group_step = {"_id": "$project"}
-
-        for state in EntityVisibility:
+        time_thresh = datetime.utcnow() - timedelta(hours=24)
+        for state in cls.visibility_states:
             if specific_state and state != specific_state:
                 continue
-            if state == EntityVisibility.active:
-                group_step[state.value] = runtime_subquery(
-                    {"$not": cls.archived_tasks_cond}
-                )
-            elif state == EntityVisibility.archived:
-                group_step[state.value] = runtime_subquery(cls.archived_tasks_cond)
+            cond = (
+                cls.archived_tasks_cond
+                if state == EntityVisibility.archived
+                else {"$not": cls.archived_tasks_cond}
+            )
+            group_step[state.value] = runtime_subquery(cond)
+            group_step[f"{state.value}_recently_completed"] = completed_after_subquery(
+                cond, time_thresh=time_thresh
+            )
 
         runtime_pipeline = [
             # only count run time for these types of tasks
@@ -445,11 +480,16 @@ class ProjectBLL:
         company: str,
         project_ids: Sequence[str],
         specific_state: Optional[EntityVisibility] = None,
+        include_children: bool = True,
     ) -> Tuple[Dict[str, dict], Dict[str, dict]]:
         if not project_ids:
             return {}, {}
 
-        child_projects = _get_sub_projects(project_ids, _only=("id", "name"))
+        child_projects = (
+            _get_sub_projects(project_ids, _only=("id", "name"))
+            if include_children
+            else {}
+        )
         project_ids_with_children = set(project_ids) | {
             c.id for c in itertools.chain.from_iterable(child_projects.values())
         }
@@ -483,8 +523,8 @@ class ProjectBLL:
         ) -> Dict[str, dict]:
             return {
                 section: {
-                    status: nested_get(a, (section, status), 0)
-                    + nested_get(b, (section, status), 0)
+                    status: nested_get(a, (section, status), default=0)
+                    + nested_get(b, (section, status), default=0)
                     for status in set(a.get(section, {})) | set(b.get(section, {}))
                 }
                 for section in set(a) | set(b)
@@ -518,15 +558,24 @@ class ProjectBLL:
         )
 
         def get_status_counts(project_id, section):
+            project_runtime = runtime.get(project_id, {})
+            project_section_statuses = nested_get(
+                status_count, (project_id, section), default=default_counts
+            )
             return {
-                "total_runtime": nested_get(runtime, (project_id, section), 0),
-                "status_count": nested_get(
-                    status_count, (project_id, section), default_counts
+                "status_count": project_section_statuses,
+                "running_tasks": project_section_statuses.get(TaskStatus.in_progress),
+                "total_tasks": sum(project_section_statuses.values()),
+                "total_runtime": project_runtime.get(section, 0),
+                "completed_tasks": project_runtime.get(
+                    f"{section}_recently_completed", 0
                 ),
             }
 
         report_for_states = [
-            s for s in EntityVisibility if not specific_state or specific_state == s
+            s
+            for s in cls.visibility_states
+            if not specific_state or specific_state == s
         ]
 
         stats = {

@@ -27,7 +27,7 @@ class ProjectOrNoneRequest(models.Base):
     include_subprojects = fields.BoolField(default=True)
 
 
-class GetHyperParamRequest(ProjectOrNoneRequest):
+class GetParamsRequest(ProjectOrNoneRequest):
     page = fields.IntField(default=0)
     page_size = fields.IntField(default=500)
 
@@ -53,6 +53,7 @@ class ProjectHyperparamValuesRequest(MultiProjectRequest):
 
 class ProjectsGetRequest(models.Base):
     include_stats = fields.BoolField(default=False)
+    stats_with_children = fields.BoolField(default=True)
     stats_for_state = ActualEnumField(EntityVisibility, default=EntityVisibility.active)
     non_public = fields.BoolField(default=False)
     active_users = fields.ListField(str)
